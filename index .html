@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Погода в Минске</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; min-height: 100%; background: #26323f; }
+  body { font: 16px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow-x: hidden; }
+  .layer { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  #sky { transition: opacity .6s; }
+  #stars i { position: absolute; background: #fff; border-radius: 50%; animation: tw 3s ease-in-out infinite; }
+  @keyframes tw { 50% { opacity: .15; } }
+  #sun, #moon { position: fixed; display: none; border-radius: 50%; }
+  #sun { width: 130px; height: 130px; top: 9vh; right: 11vw;
+    background: radial-gradient(circle, #fff8c9 0, #ffe27a 50%, #ffc043 72%);
+    box-shadow: 0 0 90px 36px rgba(255,214,102,.55); animation: pulse 6s ease-in-out infinite alternate; }
+  @keyframes pulse { to { transform: scale(1.07); } }
+  #moon { width: 84px; height: 84px; top: 11vh; right: 16vw; box-shadow: 20px 9px 0 0 #f3efd8; filter: drop-shadow(0 0 14px rgba(243,239,216,.6)); }
+  .cloud { position: absolute; left: -340px; border-radius: 100px; animation: drift linear infinite; }
+  .cloud::before, .cloud::after { content: ""; position: absolute; background: inherit; border-radius: 50%; }
+  .cloud::before { width: 50%; height: 170%; top: -75%; left: 14%; }
+  .cloud::after { width: 38%; height: 130%; top: -45%; right: 14%; }
+  @keyframes drift { to { transform: translateX(calc(100vw + 700px)); } }
+  #fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #flash { background: #dfe8ff; opacity: 0; }
+  #flash.bolt { animation: bolt .8s; }
+  @keyframes bolt { 0% { opacity: 0; } 8% { opacity: .8; } 18% { opacity: .1; } 32% { opacity: .65; } 100% { opacity: 0; } }
+
+  main { position: relative; z-index: 5; min-height: 100dvh; display: flex; flex-direction: column; gap: 22px;
+    padding: calc(env(safe-area-inset-top, 0px) + 28px) 20px calc(env(safe-area-inset-bottom, 0px) + 22px);
+    color: #fff; text-shadow: 0 1px 14px rgba(0,0,0,.28); }
+  .top { display: flex; justify-content: space-between; align-items: baseline; }
+  .city { font-size: 24px; font-weight: 600; }
+  #upd { font-size: 13px; opacity: .85; background: none; border: 0; color: inherit; text-shadow: inherit; padding: 6px 0; cursor: pointer; }
+  .hero { margin: auto 0; text-align: center; }
+  .temp { font-size: 124px; font-weight: 200; letter-spacing: -5px; line-height: 1; padding-left: 10px; }
+  .desc { font-size: 22px; font-weight: 500; margin-top: 4px; }
+  .stats { display: flex; justify-content: center; gap: 10px; margin-top: 22px; }
+  .glass { background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.22); border-radius: 18px;
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); text-shadow: none; text-shadow: 0 1px 8px rgba(0,0,0,.2); }
+  .stat { padding: 10px 14px; text-align: center; min-width: 96px; }
+  .stat b { display: block; font-size: 18px; font-weight: 600; }
+  .stat span { font-size: 12px; opacity: .85; }
+  .hours { display: flex; gap: 8px; overflow-x: auto; padding: 12px; scrollbar-width: none; }
+  .hours::-webkit-scrollbar { display: none; }
+  .h { flex: 0 0 auto; width: 58px; text-align: center; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+  .h em { font-style: normal; font-size: 24px; line-height: 1.1; }
+  .h b { font-weight: 600; }
+  @media (prefers-reduced-motion: reduce) { .cloud, #sun, #stars i { animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="layer" id="sky"></div>
+<div class="layer" id="stars"></div>
+<div id="sun"></div><div id="moon"></div>
+<div class="layer" id="clouds"></div>
+<canvas id="fx"></canvas>
+<div class="layer" id="flash"></div>
+
+<main>
+  <div class="top">
+    <div class="city">Минск</div>
+    <button id="upd">Загрузка…</button>
+  </div>
+  <div class="hero">
+    <div class="temp" id="temp">–</div>
+    <div class="desc" id="desc">&nbsp;</div>
+    <div class="stats">
+      <div class="glass stat"><b id="feels">–</b><span>ощущается</span></div>
+      <div class="glass stat"><b id="wind">–</b><span>ветер</span></div>
+      <div class="glass stat"><b id="hum">–</b><span>влажность</span></div>
+    </div>
+  </div>
+  <div class="glass hours" id="hours"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const tg = window.Telegram && Telegram.WebApp;
+const API = "https://api.open-meteo.com/v1/forecast?latitude=53.9&longitude=27.5667" +
+  "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day" +
+  "&hourly=temperature_2m,weather_code,is_day&wind_speed_unit=ms&timezone=Europe%2FMinsk&forecast_days=2";
+
+const STORM = ['#181c27', '#2a303f', '#414a5c'];
+const SKY = {
+  clear:  [['#2f86dc','#6fb4ee','#b4dbf7'], ['#070d27','#16224f','#33427a']],
+  partly: [['#3f7dbd','#7ba6cb','#b5cbdc'], ['#0b132b','#222d57','#454f7a']],
+  cloudy: [['#5f6f7e','#8593a0','#aab4be'], ['#161b24','#283039','#3d4754']],
+  fog:    [['#778189','#9aa3aa','#bac1c6'], ['#232a30','#363e45','#4f575f']],
+  rain:   [['#333d4a','#4f5b69','#6f7b87'], ['#0e131a','#1a222c','#2c3641']],
+  snow:   [['#6a7a90','#8f9fb4','#b4c1d0'], ['#18202e','#2e3b52','#4d5d76']],
+  storm:  [STORM, STORM]
+};
+// [число облаков, прозрачность, цвет днём, цвет ночью]
+const CL = {
+  clear: [2, .55, '#fff', '#6b7bb0'], partly: [4, .85, '#fff', '#6f7ba3'], cloudy: [7, .95, '#e1e6eb', '#58606c'],
+  fog: [4, .5, '#e3e7ea', '#6a737b'], rain: [7, .95, '#7a8690', '#3a434d'], storm: [7, .98, '#4a5260', '#2a303b'],
+  snow: [6, .9, '#eef2f7', '#7b879a']
+};
+const ICON = { clear: ['☀️','🌙'], partly: ['⛅','☁️'], cloudy: ['☁️','☁️'], fog: ['🌫️','🌫️'], rain: ['🌧️','🌧️'], snow: ['❄️','❄️'], storm: ['⛈️','⛈️'] };
+
+function describe(c) {
+  if (c === 0) return { cat: 'clear', t: 'Ясно' };
+  if (c === 1) return { cat: 'clear', t: 'Преимущественно ясно' };
+  if (c === 2) return { cat: 'partly', t: 'Переменная облачность' };
+  if (c === 3) return { cat: 'cloudy', t: 'Пасмурно' };
+  if (c === 45 || c === 48) return { cat: 'fog', t: 'Туман' };
+  if (c >= 51 && c <= 57) return { cat: 'rain', t: 'Морось', lv: 1 };
+  if (c === 61) return { cat: 'rain', t: 'Небольшой дождь', lv: 1 };
+  if (c === 63) return { cat: 'rain', t: 'Дождь', lv: 2 };
+  if (c === 65) return { cat: 'rain', t: 'Сильный дождь', lv: 3 };
+  if (c === 66 || c === 67) return { cat: 'rain', t: 'Ледяной дождь', lv: 2 };
+  if (c === 71) return { cat: 'snow', t: 'Небольшой снег', lv: 1 };
+  if (c === 73) return { cat: 'snow', t: 'Снег', lv: 2 };
+  if (c === 75 || c === 86) return { cat: 'snow', t: 'Сильный снег', lv: 3 };
+  if (c === 77 || c === 85) return { cat: 'snow', t: 'Снегопад', lv: 2 };
+  if (c === 80) return { cat: 'rain', t: 'Небольшой ливень', lv: 2 };
+  if (c === 81 || c === 82) return { cat: 'rain', t: 'Ливень', lv: 3 };
+  if (c >= 95) return { cat: 'storm', t: c === 95 ? 'Гроза' : 'Гроза с градом', lv: 3 };
+  return { cat: 'cloudy', t: 'Облачно' };
+}
+const fmt = t => { t = Math.round(t); return t > 0 ? '+' + t + '°' : t < 0 ? '−' + Math.abs(t) + '°' : '0°'; };
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+/* ---------- звёзды ---------- */
+for (let i = 0; i < 70; i++) {
+  const s = document.createElement('i'), z = rnd(1, 2.6);
+  s.style.cssText = `left:${rnd(0,100)}%;top:${rnd(0,65)}%;width:${z}px;height:${z}px;animation-delay:${rnd(0,3)}s;opacity:${rnd(.4,1)}`;
+  $('stars').appendChild(s);
+}
+
+/* ---------- осадки (canvas) ---------- */
+const cv = $('fx'), cx = cv.getContext('2d');
+let W, H, parts = [], mode = null, raf = 0, last = 0;
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+function size() {
+  const d = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight; cv.width = W * d; cv.height = H * d; cx.setTransform(d, 0, 0, d, 0, 0);
+}
+addEventListener('resize', size); size();
+function mk(init) {
+  const rain = mode === 'rain';
+  return { x: rnd(-.1 * W, 1.1 * W), y: init ? rnd(0, H) : -20, a: rnd(.25, .7), ph: rnd(0, 6.28),
+    l: rain ? rnd(10, 24) : 0, v: rain ? rnd(650, 1100) : rnd(45, 110), r: rnd(1, 3.2) };
+}
+function setFx(kind, lv) {
+  cancelAnimationFrame(raf); mode = kind; parts = []; cx.clearRect(0, 0, W, H);
+  if (!kind || still) return;
+  const n = Math.round(({ rain: [80, 150, 240], snow: [50, 100, 160] }[kind][(lv || 2) - 1]) * Math.max(W, 360) / 400);
+  for (let i = 0; i < n; i++) parts.push(mk(true));
+  last = performance.now(); raf = requestAnimationFrame(loop);
+}
+function loop(t) {
+  const dt = Math.min((t - last) / 1000, .05); last = t;
+  cx.clearRect(0, 0, W, H);
+  for (const p of parts) {
+    if (mode === 'rain') {
+      p.y += p.v * dt; p.x -= 110 * dt;
+      cx.strokeStyle = `rgba(215,228,255,${p.a})`; cx.lineWidth = 1.2;
+      cx.beginPath(); cx.moveTo(p.x, p.y); cx.lineTo(p.x + p.l * .16, p.y - p.l); cx.stroke();
+      if (p.y > H + 20 || p.x < -30) { p.y = -20; p.x = rnd(0, 1.15 * W); }
+    } else {
+      p.y += p.v * dt; p.x += Math.sin(t / 900 + p.ph) * 22 * dt - 8 * dt;
+      cx.fillStyle = `rgba(255,255,255,${p.a + .25})`;
+      cx.beginPath(); cx.arc(p.x, p.y, p.r, 0, 6.283); cx.fill();
+      if (p.y > H + 10) { p.y = -10; p.x = rnd(0, W); }
+    }
+  }
+  raf = requestAnimationFrame(loop);
+}
+
+/* ---------- молнии ---------- */
+let boltTimer = 0;
+function strike() {
+  const f = $('flash'); f.classList.remove('bolt'); void f.offsetWidth; f.classList.add('bolt');
+  boltTimer = setTimeout(strike, rnd(3500, 9000));
+}
+
+/* ---------- сцена ---------- */
+function scene(cat, night, lv) {
+  const s = SKY[cat][night ? 1 : 0];
+  $('sky').style.background = `linear-gradient(180deg, ${s[0]}, ${s[1]} 55%, ${s[2]})`;
+  document.documentElement.style.background = s[1];
+  const sky = cat === 'clear' || cat === 'partly';
+  $('sun').style.display = !night && sky ? 'block' : 'none';
+  $('sun').style.opacity = cat === 'partly' ? .85 : 1;
+  $('moon').style.display = night && sky ? 'block' : 'none';
+  $('moon').style.opacity = cat === 'partly' ? .8 : 1;
+  $('stars').style.opacity = night && sky ? (cat === 'clear' ? 1 : .45) : 0;
+
+  const box = $('clouds'); box.innerHTML = '';
+  const [n, op, cd, cn] = CL[cat], fog = cat === 'fog';
+  for (let i = 0; i < n; i++) {
+    const c = document.createElement('div'), w = fog ? rnd(520, 800) : rnd(180, 320), dur = (cat === 'storm' ? rnd(45, 90) : rnd(70, 150));
+    c.className = 'cloud';
+    c.style.cssText = `width:${w}px;height:${fog ? rnd(80, 120) : rnd(50, 80)}px;top:${fog ? rnd(25, 80) : rnd(1, 38)}vh;` +
+      `background:${night ? cn : cd};opacity:${op * rnd(.7, 1)};filter:blur(${fog ? 22 : 6}px);` +
+      `animation-duration:${dur}s;animation-delay:-${rnd(0, dur)}s`;
+    box.appendChild(c);
+  }
+  setFx(cat === 'rain' || cat === 'storm' ? 'rain' : cat === 'snow' ? 'snow' : null, lv);
+  clearTimeout(boltTimer);
+  if (cat === 'storm' && !still) boltTimer = setTimeout(strike, 1500);
+  if (tg) { try { tg.setHeaderColor(s[0]); tg.setBackgroundColor(s[1]); } catch (e) {} }
+}
+
+/* ---------- данные ---------- */
+function show(d) {
+  const c = d.current, info = describe(c.weather_code), night = !c.is_day;
+  scene(info.cat, night, info.lv);
+  $('temp').textContent = fmt(c.temperature_2m);
+  $('desc').textContent = info.t;
+  $('feels').textContent = fmt(c.apparent_temperature);
+  $('wind').textContent = Math.round(c.wind_speed_10m) + ' м/с';
+  $('hum').textContent = Math.round(c.relative_humidity_2m) + '%';
+  const now = c.time.slice(0, 13), h = d.hourly;
+  let i = h.time.findIndex(t => t.slice(0, 13) >= now); if (i < 0) i = 0;
+  $('hours').innerHTML = '';
+  for (let k = i; k < Math.min(i + 12, h.time.length); k++) {
+    const hi = describe(h.weather_code[k]), el = document.createElement('div');
+    el.className = 'h';
+    el.innerHTML = '<span></span><em></em><b></b>';
+    el.children[0].textContent = k === i ? 'Сейчас' : h.time[k].slice(11, 13) + ':00';
+    el.children[1].textContent = ICON[hi.cat][h.is_day[k] ? 0 : 1];
+    el.children[2].textContent = fmt(h.temperature_2m[k]);
+    $('hours').appendChild(el);
+  }
+}
+function demo() {
+  const q = new URLSearchParams(location.search), m = { clear: 0, partly: 2, cloudy: 3, fog: 45, rain: 63, snow: 73, storm: 95 }[q.get('demo')];
+  if (m === undefined) return null;
+  const night = q.get('night') === '1', hours = {
+    time: [], temperature_2m: [], weather_code: [], is_day: []
+  };
+  for (let k = 0; k < 12; k++) { hours.time.push('2026-01-01T' + String(k).padStart(2, '0') + ':00'); hours.temperature_2m.push(2 + k % 4); hours.weather_code.push(m); hours.is_day.push(night ? 0 : 1); }
+  return { current: { time: '2026-01-01T00:10', temperature_2m: 2, apparent_temperature: -1, relative_humidity_2m: 80, weather_code: m, wind_speed_10m: 5, is_day: night ? 0 : 1 }, hourly: hours };
+}
+let lastOk = 0;
+async function load() {
+  const dm = demo(); if (dm) { show(dm); $('upd').textContent = 'демо'; return; }
+  $('upd').textContent = 'Обновляю…';
+  try {
+    const r = await fetch(API, { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json(); show(d); lastOk = Date.now();
+    try { localStorage.setItem('minsk-weather', JSON.stringify(d)); } catch (e) {}
+    $('upd').textContent = 'Обновлено ' + new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Minsk' }) + ' · авто 5 мин ↻';
+  } catch (e) {
+    $('upd').textContent = 'Нет связи, нажмите ↻';
+  }
+}
+try { const c = JSON.parse(localStorage.getItem('minsk-weather')); if (c && c.current) show(c); else scene('clear', false); } catch (e) { scene('clear', false); }
+if (tg) { tg.ready(); tg.expand(); try { tg.disableVerticalSwipes(); } catch (e) {} }
+$('upd').addEventListener('click', () => { try { tg.HapticFeedback.impactOccurred('light'); } catch (e) {} load(); });
+setInterval(load, 5 * 60 * 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - lastOk > 3 * 60 * 1000) load(); });
+addEventListener('online', load);
+load();
+</script>
+</body>
+</html>
